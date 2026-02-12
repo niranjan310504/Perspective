@@ -1,0 +1,66 @@
+# Perspective - Docker Compose Configuration
+# Development and Production setups
+
+version: '3.8'
+
+services:
+  # Full Application (Backend + Frontend)
+  perspective:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY:-change-this-in-production}
+      - MODEL_DEVICE=cpu
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=http://localhost:3000
+    volumes:
+      # Mount model checkpoints (optional - for model updates)
+      - ./model/checkpoints:/app/model/checkpoints:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Development Backend Only
+  backend-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    volumes:
+      - ./backend:/app/backend
+      - ./model:/app/model
+      - ./data:/app/data
+    profiles:
+      - dev
+
+  # Development Frontend Only
+  frontend-dev:
+    image: node:18-alpine
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm start
+    profiles:
+      - dev
+
+# Volume for optional Redis cache (rate limiting)
+volumes:
+  redis-data:

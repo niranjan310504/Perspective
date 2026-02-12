@@ -1,0 +1,28 @@
+# Perspective - Development Dockerfile
+# For local development with hot-reload
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    FLASK_ENV=development \
+    FLASK_DEBUG=1
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+EXPOSE 5000
+
+# Run with Flask development server
+CMD ["python", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000"]
