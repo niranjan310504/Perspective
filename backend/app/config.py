@@ -12,10 +12,15 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Allowed domains for URL extraction (SSRF protection)
 ALLOWED_URL_DOMAINS = [
+    # Major Indian news outlets
     'ndtv.com', 'thehindu.com', 'hindustantimes.com', 'indianexpress.com',
     'timesofindia.indiatimes.com', 'news18.com', 'thewire.in', 'theprint.in',
     'scroll.in', 'firstpost.com', 'swarajyamag.com', 'opindia.com',
     'livemint.com', 'economictimes.indiatimes.com', 'business-standard.com',
+    'zeenews.india.com', 'aajtak.in', 'abplive.com', 'deccanherald.com',
+    'tribuneindia.com', 'telegraphindia.com', 'dnaindia.com', 'mid-day.com',
+    'outlookindia.com', 'newslaundry.com', 'thenewsminute.com', 'thequint.com',
+    # International outlets
     'reuters.com', 'bbc.com', 'aljazeera.com', 'cnn.com', 'theguardian.com'
 ]
 

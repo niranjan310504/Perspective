@@ -383,7 +383,8 @@ def is_safe_url(url: str) -> bool:
 
 def extract_article_from_url(url: str) -> Optional[str]:
     """
-    Extract article text from a URL.
+    Extract article text from a URL with multiple fallback methods.
+    Uses cloudscraper to bypass anti-bot protection (Cloudflare, etc.)
     
     Args:
         url: Article URL
@@ -391,60 +392,111 @@ def extract_article_from_url(url: str) -> Optional[str]:
     Returns:
         Extracted text or None if extraction fails
     """
+    from bs4 import BeautifulSoup
+    
+    # SSRF Protection: Validate URL is safe
+    if not is_safe_url(url):
+        current_app.logger.warning(f"Blocked unsafe URL: {url}")
+        return None
+    
+    # Validate URL format
+    url_pattern = re.compile(
+        r'^https?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
+        r'localhost|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+        r'(?::\d+)?'
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE
+    )
+    
+    if not url_pattern.match(url):
+        return None
+    
+    # Method 1: Use cloudscraper (bypasses Cloudflare and anti-bot protection)
     try:
-        # SSRF Protection: Validate URL is safe
-        if not is_safe_url(url):
-            current_app.logger.warning(f"Blocked unsafe URL: {url}")
-            return None
+        import cloudscraper
         
-        # Validate URL format
-        url_pattern = re.compile(
-            r'^https?://'
-            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
-            r'localhost|'
-            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
-            r'(?::\d+)?'
-            r'(?:/?|[/?]\S+)$', re.IGNORECASE
+        scraper = cloudscraper.create_scraper(
+            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
         )
+        response = scraper.get(url, timeout=20)
         
-        if not url_pattern.match(url):
-            return None
+        # Check if we got redirected to homepage (bot detection)
+        if response.status_code == 200 and response.url.rstrip('/') != url.rstrip('/'):
+            # Check if it's just a trailing slash difference or actual redirect
+            if not response.url.startswith(url.rstrip('/')):
+                current_app.logger.warning(f"Redirected from {url} to {response.url}")
+                raise Exception("Redirected to different page")
         
-        # Try using newspaper3k
-        try:
-            from newspaper import Article
-            
-            article = Article(url)
-            article.download()
-            article.parse()
-            
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Remove unwanted elements
+        for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe', 'noscript', 'form']):
+            element.decompose()
+        
+        # Try multiple selectors in order of specificity
+        article_selectors = [
+            '.entry-content',
+            '.post-content', 
+            '.article-content',
+            '.story-content',
+            '[itemprop="articleBody"]',
+            'article',
+            '.content-area',
+            'main',
+            '#content',
+        ]
+        
+        for selector in article_selectors:
+            element = soup.select_one(selector)
+            if element:
+                # Get paragraphs for cleaner text
+                paragraphs = element.find_all('p')
+                if paragraphs:
+                    article_text = ' '.join(
+                        p.get_text(strip=True) for p in paragraphs 
+                        if len(p.get_text(strip=True)) > 20
+                    )
+                    if len(article_text) > 200:
+                        current_app.logger.info(f"Extracted {len(article_text)} chars from {url}")
+                        return article_text
+        
+        # Fallback: get all text from body
+        body = soup.find('body')
+        if body:
+            text = ' '.join(body.stripped_strings)
+            if len(text) > 200:
+                return text[:10000]  # Limit length
+                
+    except ImportError:
+        current_app.logger.warning("cloudscraper not installed, falling back to requests")
+    except Exception as e:
+        current_app.logger.debug(f"cloudscraper extraction failed: {e}")
+    
+    # Method 2: Fallback to newspaper3k
+    try:
+        from newspaper import Article, Config
+        
+        config = Config()
+        config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        config.request_timeout = 15
+        config.fetch_images = False
+        
+        article = Article(url, config=config)
+        article.download()
+        article.parse()
+        
+        if article.text and len(article.text) > 100:
+            current_app.logger.info(f"Extracted {len(article.text)} chars using newspaper3k from {url}")
             return article.text
             
-        except ImportError:
-            # Fallback to requests + BeautifulSoup
-            import requests
-            from bs4 import BeautifulSoup
-            
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Remove script and style elements
-            for element in soup(['script', 'style', 'nav', 'footer', 'header']):
-                element.decompose()
-            
-            # Extract text from article-like elements
-            article = soup.find('article') or soup.find('main') or soup.body
-            
-            if article:
-                return ' '.join(article.stripped_strings)
-            
-            return None
-            
     except Exception as e:
-        current_app.logger.error(f"URL extraction error: {e}")
-        return None
+        current_app.logger.debug(f"newspaper3k extraction failed: {e}")
+    
+    current_app.logger.error(f"All extraction methods failed for URL: {url}")
+    return None
 
 
 # =====================

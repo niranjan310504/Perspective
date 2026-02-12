@@ -17,6 +17,7 @@ requests==2.31.0
 # Data processing
 beautifulsoup4==4.12.0
 tqdm==4.66.0
+cloudscraper==1.2.71
 
 # Data Collection
 # GDELT: No package needed - uses requests (already included)

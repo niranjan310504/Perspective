@@ -15,12 +15,13 @@ import hashlib
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, asdict
 from collections import OrderedDict
 import re
 from urllib.parse import urlparse
 import logging
+from xml.etree.ElementTree import Element  # For type hints
 
 # Use defusedxml to prevent XXE attacks
 try:
@@ -172,7 +173,7 @@ class NewsFeedService:
         """Generate a cache key from arguments."""
         return hashlib.md5(str(args).encode()).hexdigest()
     
-    def _set_cache(self, key: str, data: any):
+    def _set_cache(self, key: str, data: Any):
         """Set cache with LRU eviction."""
         # Remove oldest entries if at capacity
         while len(self._cache) >= self.MAX_CACHE_SIZE:
@@ -214,7 +215,7 @@ class NewsFeedService:
         clean = re.sub(r'\s+', ' ', clean).strip()
         return clean[:500]  # Limit description length
     
-    def _extract_image(self, item: ET.Element, namespaces: dict) -> Optional[str]:
+    def _extract_image(self, item: Element, namespaces: dict) -> Optional[str]:
         """Extract image URL from RSS item."""
         # Try media:content
         media = item.find('.//media:content', namespaces)
@@ -279,8 +280,8 @@ class NewsFeedService:
                     
                     title = self._clean_html(title_elem.text or "")
                     url = link_elem.text or ""
-                    description = self._clean_html(desc_elem.text if desc_elem is not None else "")
-                    pub_date = pub_date_elem.text if pub_date_elem is not None else ""
+                    description = self._clean_html(desc_elem.text if desc_elem is not None and desc_elem.text else "")
+                    pub_date = pub_date_elem.text if pub_date_elem is not None and pub_date_elem.text else ""
                     
                     # Generate unique ID
                     article_id = hashlib.md5(url.encode()).hexdigest()[:12]
@@ -311,7 +312,7 @@ class NewsFeedService:
             
         return articles
     
-    def _fetch_newsapi(self, query: str = "India", category: str = None) -> List[NewsArticle]:
+    def _fetch_newsapi(self, query: str = "India", category: Optional[str] = None) -> List[NewsArticle]:
         """Fetch news from NewsAPI (if API key available)."""
         if not self.news_api_key:
             return []

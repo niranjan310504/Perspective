@@ -112,12 +112,25 @@ function NewsCard({ article, onAnalyze }) {
           <span className="text-xs text-gray-500">
             {formatDate(article.published_at)}
           </span>
-          <button
-            onClick={() => onAnalyze(article)}
-            className="px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
-          >
-            Analyze Bias
-          </button>
+          <div className="flex gap-2">
+            <a
+              href={article.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors inline-flex items-center gap-1"
+            >
+              Read
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </a>
+            <button
+              onClick={() => onAnalyze(article)}
+              className="px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+            >
+              Analyze Bias
+            </button>
+          </div>
         </div>
       </div>
     </article>

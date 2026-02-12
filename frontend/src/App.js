@@ -23,6 +23,7 @@ function App() {
   const [inputText, setInputText] = useState('');
   const [inputUrl, setInputUrl] = useState('');
   const [results, setResults] = useState(null);
+  const [analyzedUrl, setAnalyzedUrl] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('text'); // 'text' or 'url'
@@ -95,6 +96,7 @@ function App() {
     setLoading(true);
     setError(null);
     setResults(null);
+    setAnalyzedUrl(activeTab === 'url' ? inputUrl : null);
 
     try {
       const payload = activeTab === 'text' 
@@ -279,7 +281,7 @@ function App() {
                   <FactCheckSection factCheck={results.fact_check} />
                   
                   {/* Bias Analysis Results */}
-                  <ResultsSection results={results} />
+                  <ResultsSection results={results} articleUrl={analyzedUrl} />
                 </>
               )}
             </>

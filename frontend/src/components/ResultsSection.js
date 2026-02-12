@@ -118,7 +118,7 @@ const getSeverity = (score) => {
 /**
  * Results Section Component
  */
-function ResultsSection({ results }) {
+function ResultsSection({ results, articleUrl }) {
   const [expandedBias, setExpandedBias] = useState(null);
   
   if (!results) return null;
@@ -189,19 +189,55 @@ function ResultsSection({ results }) {
                 <li>• <strong>Check the facts</strong> - Are claims backed by evidence?</li>
               </ul>
             </div>
+
+            {/* Read Article Button */}
+            {articleUrl && (
+              <div className="mt-4 flex justify-center">
+                <a
+                  href={articleUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                  Read Original Article
+                </a>
+              </div>
+            )}
           </>
         ) : (
-          <div className="flex items-center">
-            <span className="text-3xl mr-3">✅</span>
-            <div>
-              <h3 className="text-xl font-bold text-green-800">
-                Low Bias Detected
-              </h3>
-              <p className="text-green-700">
-                This article appears to be relatively balanced. However, always verify important claims from multiple sources.
-              </p>
+          <>
+            <div className="flex items-center">
+              <span className="text-3xl mr-3">✅</span>
+              <div>
+                <h3 className="text-xl font-bold text-green-800">
+                  Low Bias Detected
+                </h3>
+                <p className="text-green-700">
+                  This article appears to be relatively balanced. However, always verify important claims from multiple sources.
+                </p>
+              </div>
             </div>
-          </div>
+
+            {/* Read Article Button */}
+            {articleUrl && (
+              <div className="mt-4 flex justify-center">
+                <a
+                  href={articleUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-green-600 text-white font-medium rounded-lg hover:bg-green-700 transition-colors shadow-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                  Read Original Article
+                </a>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -371,11 +407,13 @@ ResultsSection.propTypes = {
     ).isRequired,
     detected_biases: PropTypes.arrayOf(PropTypes.string).isRequired,
     summary: PropTypes.string.isRequired
-  })
+  }),
+  articleUrl: PropTypes.string
 };
 
 ResultsSection.defaultProps = {
-  results: null
+  results: null,
+  articleUrl: null
 };
 
 export default ResultsSection;
