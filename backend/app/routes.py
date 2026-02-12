@@ -10,7 +10,8 @@ Endpoints:
 
 import re
 import time
-from flask import Blueprint, request, jsonify, current_app
+from functools import wraps
+from flask import Blueprint, request, jsonify, current_app, g
 from typing import Optional
 
 from backend.app.fact_check import check_facts
@@ -44,6 +45,26 @@ def get_predictor():
     return _predictor
 
 
+def rate_limit_analyze(f):
+    """Apply rate limiting to expensive analysis endpoints."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if hasattr(current_app, 'limiter'):
+            limit = current_app.config.get('RATE_LIMIT_ANALYZE', '30 per minute')
+            return current_app.limiter.limit(limit)(f)(*args, **kwargs)
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def sanitize_text(text: str) -> str:
+    """Remove control characters and sanitize input text."""
+    if not text:
+        return text
+    # Remove control characters (except newlines and tabs)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    return text
+
+
 # Create blueprint
 api_bp = Blueprint('api', __name__)
 
@@ -70,6 +91,7 @@ def health_check():
 
 
 @api_bp.route('/analyze', methods=['POST'])
+@rate_limit_analyze
 def analyze_text():
     """
     Analyze text for media bias.
@@ -140,6 +162,9 @@ def analyze_text():
             'error': 'Text must contain at least 10 words'
         }), 400
     
+    # Sanitize text - remove control characters
+    text = sanitize_text(text)
+    
     try:
         # Get predictor and run inference
         predictor = get_predictor()
@@ -172,6 +197,7 @@ def analyze_text():
 
 
 @api_bp.route('/analyze/batch', methods=['POST'])
+@rate_limit_analyze
 def analyze_batch():
     """
     Analyze multiple texts for bias.
@@ -342,8 +368,11 @@ def is_safe_url(url: str) -> bool:
             )
             if not domain_allowed:
                 current_app.logger.warning(f"URL domain not in allowed list: {hostname}")
-                # For now, just log - uncomment below to enforce
-                # return False
+                return False  # Enforce domain allowlist
+        
+        # Block IPv6 private addresses
+        if ip.startswith('::1') or ip.startswith('fc') or ip.startswith('fd') or ip.startswith('fe80'):
+            return False
         
         return True
         
@@ -416,6 +445,116 @@ def extract_article_from_url(url: str) -> Optional[str]:
     except Exception as e:
         current_app.logger.error(f"URL extraction error: {e}")
         return None
+
+
+# =====================
+# News Feed Endpoints
+# =====================
+
+@api_bp.route('/news/feed', methods=['GET'])
+def get_news_feed():
+    """
+    Get live news feed from multiple sources.
+    
+    Query Parameters:
+        - category: Filter by category (general, india, world, opinion)
+        - lean: Filter by political lean (left, center, right)
+        - limit: Maximum articles to return (default: 50, max: 100)
+    
+    Returns:
+        {
+            "success": true,
+            "data": {
+                "articles": [...],
+                "total": 50,
+                "sources_count": 12,
+                "fetched_at": "2024-01-15T10:30:00",
+                "filters": {...}
+            }
+        }
+    """
+    from backend.app.news_feed import get_news_feed_service
+    
+    try:
+        # Parse query parameters
+        category = request.args.get('category')
+        lean = request.args.get('lean')
+        
+        # Parse limit with error handling
+        try:
+            limit = min(int(request.args.get('limit', 50)), 100)
+        except (ValueError, TypeError):
+            limit = 50
+        
+        # Validate parameters
+        valid_categories = ['general', 'india', 'world', 'opinion', None]
+        valid_leans = ['left', 'center', 'right', 'center-left', None]
+        
+        if category and category not in valid_categories:
+            return jsonify({
+                'success': False,
+                'error': f'Invalid category. Must be one of: {valid_categories[:-1]}'
+            }), 400
+            
+        if lean and lean not in valid_leans:
+            return jsonify({
+                'success': False,
+                'error': f'Invalid lean. Must be one of: {valid_leans[:-1]}'
+            }), 400
+        
+        # Get news feed
+        service = get_news_feed_service()
+        feed_data = service.get_feed(category=category, lean=lean, limit=limit)
+        
+        return jsonify({
+            'success': True,
+            'data': feed_data
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"News feed error: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch news feed'
+        }), 500
+
+
+@api_bp.route('/news/sources', methods=['GET'])
+def get_news_sources():
+    """
+    Get information about available news sources.
+    
+    Returns:
+        {
+            "success": true,
+            "data": {
+                "sources": [
+                    {"name": "Times of India", "lean": "center", "category": "general"},
+                    ...
+                ]
+            }
+        }
+    """
+    from backend.app.news_feed import get_news_feed_service
+    
+    try:
+        service = get_news_feed_service()
+        sources = service.get_source_info()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'sources': sources,
+                'total': len(sources)
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"News sources error: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch news sources'
+        }), 500
 
 
 # Error handlers

@@ -7,9 +7,10 @@ Creates and configures the Flask application.
 
 import os
 import time
+import uuid
 import logging
 from typing import Optional
-from flask import Flask, jsonify, g
+from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 
 # Configure logging
@@ -96,12 +97,22 @@ def create_app(config_name: Optional[str] = None) -> Flask:
             response.headers[header] = value
         return response
     
-    # Request timeout handling
+    # Validate production config
+    if config_name == 'production':
+        secret_key = app.config.get('SECRET_KEY')
+        if not secret_key or secret_key == 'dev-secret-key-change-in-production':
+            raise RuntimeError(
+                'SECRET_KEY must be set in production! '
+                'Set the SECRET_KEY environment variable.'
+            )
+    
+    # Request timeout and ID handling
     @app.before_request
-    def set_request_timeout():
-        """Set request timeout context."""
+    def set_request_context():
+        """Set request timeout and ID context."""
         g.request_start_time = time.time()
         g.request_timeout = app.config.get('REQUEST_TIMEOUT', 30)
+        g.request_id = request.headers.get('X-Request-ID', str(uuid.uuid4())[:8])
     
     @app.after_request
     def log_request_time(response):

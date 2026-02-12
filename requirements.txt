@@ -24,6 +24,9 @@ tqdm==4.66.0
 newspaper3k==0.2.8
 lxml==4.9.3
 
+# Security
+defusedxml==0.7.1
+
 # LLM for labeling (Gemini)
 google-generativeai==0.3.0
 

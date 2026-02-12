@@ -4,9 +4,10 @@ import InputSection from './components/InputSection';
 import ResultsSection from './components/ResultsSection';
 import FactCheckSection from './components/FactCheckSection';
 import BiasExplanations from './components/BiasExplanations';
+import NewsFeed from './components/NewsFeed';
 import Footer from './components/Footer';
 import ErrorBoundary from './components/ErrorBoundary';
-import { analyzeText, checkHealth } from './services/api';
+import { analyzeText, checkHealth, API_BASE_URL } from './services/api';
 
 // Constants
 const MIN_TEXT_LENGTH = 50;
@@ -26,6 +27,8 @@ function App() {
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('text'); // 'text' or 'url'
   const [serverStatus, setServerStatus] = useState('checking'); // 'checking', 'online', 'offline'
+  const [viewMode, setViewMode] = useState('feed'); // 'feed' or 'analyze'
+  const [pendingAnalysis, setPendingAnalysis] = useState(null); // URL to auto-analyze
 
   /**
    * Check server health on mount
@@ -133,6 +136,29 @@ function App() {
     setError(null);
   };
 
+  /**
+   * Handle analyze from news feed
+   */
+  const handleAnalyzeFromFeed = (article) => {
+    setInputUrl(article.url);
+    setActiveTab('url');
+    setViewMode('analyze');
+    setResults(null);
+    setError(null);
+    // Set pending analysis to trigger useEffect
+    setPendingAnalysis(article.url);
+  };
+
+  /**
+   * Auto-analyze when URL is set from news feed
+   */
+  useEffect(() => {
+    if (pendingAnalysis && viewMode === 'analyze' && !loading) {
+      setPendingAnalysis(null);
+      handleAnalyze();
+    }
+  }, [pendingAnalysis, viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -150,63 +176,112 @@ function App() {
           </div>
         )}
         
-        <main className="flex-grow container mx-auto px-4 py-8 max-w-4xl">
-          {/* Input Section */}
-          <InputSection
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            inputText={inputText}
-            setInputText={setInputText}
-            inputUrl={inputUrl}
-            setInputUrl={setInputUrl}
-            onAnalyze={handleAnalyze}
-            onClear={handleClear}
-            onLoadSample={handleLoadSample}
-            loading={loading}
-          />
-
-          {/* Error Display */}
-          {error && (
-            <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 fade-in">
-              <div className="flex items-center">
-                <svg className="w-5 h-5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                </svg>
-                <span>{error}</span>
-                <button 
-                  onClick={() => setError(null)}
-                  className="ml-auto text-red-500 hover:text-red-700"
-                  aria-label="Dismiss error"
-                >
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+        <main className="flex-grow container mx-auto px-4 py-8 max-w-6xl">
+          {/* View Mode Toggle */}
+          <div className="flex justify-center mb-8">
+            <div className="inline-flex bg-gray-100 rounded-xl p-1">
+              <button
+                onClick={() => setViewMode('feed')}
+                className={`px-6 py-3 rounded-lg font-medium transition-all ${
+                  viewMode === 'feed'
+                    ? 'bg-white text-indigo-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
                   </svg>
-                </button>
-              </div>
+                  Live Feed
+                </span>
+              </button>
+              <button
+                onClick={() => setViewMode('analyze')}
+                className={`px-6 py-3 rounded-lg font-medium transition-all ${
+                  viewMode === 'analyze'
+                    ? 'bg-white text-indigo-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                  </svg>
+                  Analyze Custom
+                </span>
+              </button>
             </div>
+          </div>
+
+          {/* News Feed View */}
+          {viewMode === 'feed' && (
+            <NewsFeed 
+              apiBaseUrl={API_BASE_URL}
+              onAnalyzeArticle={handleAnalyzeFromFeed}
+            />
           )}
 
-          {/* Loading State */}
-          {loading && (
-            <div className="mt-8 text-center">
-              <div className="inline-flex items-center px-6 py-3 bg-primary-50 rounded-lg">
-                <svg className="animate-spin h-5 w-5 mr-3 text-primary-600" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                <span className="text-primary-700 font-medium">Analyzing article for bias and fact-checking...</span>
-              </div>
-            </div>
-          )}
-
-          {/* Results Section */}
-          {results && !loading && (
+          {/* Analyze View */}
+          {viewMode === 'analyze' && (
             <>
-              {/* Fact Check Results - Show First */}
-              <FactCheckSection factCheck={results.fact_check} />
-              
-              {/* Bias Analysis Results */}
-              <ResultsSection results={results} />
+              {/* Input Section */}
+              <InputSection
+                activeTab={activeTab}
+                setActiveTab={setActiveTab}
+                inputText={inputText}
+                setInputText={setInputText}
+                inputUrl={inputUrl}
+                setInputUrl={setInputUrl}
+                onAnalyze={handleAnalyze}
+                onClear={handleClear}
+                onLoadSample={handleLoadSample}
+                loading={loading}
+              />
+
+              {/* Error Display */}
+              {error && (
+                <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 fade-in">
+                  <div className="flex items-center">
+                    <svg className="w-5 h-5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                    </svg>
+                    <span>{error}</span>
+                    <button 
+                      onClick={() => setError(null)}
+                      className="ml-auto text-red-500 hover:text-red-700"
+                      aria-label="Dismiss error"
+                    >
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Loading State */}
+              {loading && (
+                <div className="mt-8 text-center">
+                  <div className="inline-flex items-center px-6 py-3 bg-primary-50 rounded-lg">
+                    <svg className="animate-spin h-5 w-5 mr-3 text-primary-600" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    <span className="text-primary-700 font-medium">Analyzing article for bias and fact-checking...</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Results Section */}
+              {results && !loading && (
+                <>
+                  {/* Fact Check Results - Show First */}
+                  <FactCheckSection factCheck={results.fact_check} />
+                  
+                  {/* Bias Analysis Results */}
+                  <ResultsSection results={results} />
+                </>
+              )}
             </>
           )}
 

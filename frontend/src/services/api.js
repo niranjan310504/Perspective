@@ -3,7 +3,7 @@ import axios from 'axios';
 /**
  * API Configuration
  */
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+export const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // ms
 
@@ -41,7 +41,10 @@ const withRetry = async (fn, retries = MAX_RETRIES, delay = RETRY_DELAY) => {
     }
     
     if (retries > 0) {
-      console.log(`Retrying... ${retries} attempts left`);
+      // Only log in development
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`Retrying... ${retries} attempts left`);
+      }
       await sleep(delay);
       return withRetry(fn, retries - 1, delay * 2); // Exponential backoff
     }
