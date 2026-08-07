@@ -9,15 +9,78 @@ Endpoints:
 """
 
 import re
+import os
 import time
+import threading
 from functools import wraps
 from flask import Blueprint, request, jsonify, current_app, g
 from typing import Optional
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 from backend.app.fact_check import check_facts
 
 # Lazy model loading
 _predictor = None
+_predictor_lock = threading.Lock()
+_predictor_loading = False
+
+
+def _fallback_predict(text: str):
+    """Return a fast heuristic prediction when the trained model is not ready."""
+    lowered = text.lower()
+
+    keyword_map = {
+        'political': ['government', 'opposition', 'party', 'prime minister', 'chief minister', 'election', 'bjp', 'congress'],
+        'gender': ['woman', 'women', 'man', 'men', 'lady', 'female', 'male', 'gender'],
+        'entity': ['company', 'corporation', 'organization', 'minister', 'leader', 'officials', 'business'],
+        'racial': ['race', 'ethnic', 'caste', 'community', 'minority', 'majority'],
+        'religious': ['religion', 'religious', 'muslim', 'hindu', 'christian', 'sikh', 'temple', 'mosque', 'church'],
+        'regional': ['state', 'region', 'north', 'south', 'east', 'west', 'tamil nadu', 'kerala', 'up', 'bihar', 'maharashtra'],
+        'sensationalism': ['shocking', 'breaking', 'horrific', 'explosive', 'massive', 'disaster', 'carnage', 'outrage']
+    }
+
+    result = {'biases': {}, 'detected_biases': [], 'summary': ''}
+
+    for label in ['political', 'gender', 'entity', 'racial', 'religious', 'regional', 'sensationalism']:
+        matched = any(keyword in lowered for keyword in keyword_map[label])
+        score = 0.72 if matched else 0.12
+        detected = score >= 0.5
+
+        result['biases'][label] = {
+            'detected': detected,
+            'score': score,
+        }
+
+        if detected:
+            result['detected_biases'].append(label)
+
+    result['summary'] = (
+        'Heuristic fallback detected possible bias patterns. '
+        if result['detected_biases']
+        else 'Heuristic fallback did not detect strong bias patterns.'
+    )
+    return result
+
+
+def warm_predictor_async(app):
+    """Warm the trained predictor in the background so the first request is not blocked."""
+    global _predictor_loading
+    if _predictor is not None or _predictor_loading:
+        return
+
+    def _load():
+        global _predictor_loading
+        try:
+            with app.app_context():
+                get_predictor()
+        except Exception as exc:
+            app.logger.warning(f"Background predictor warmup failed: {exc}")
+        finally:
+            _predictor_loading = False
+
+    _predictor_loading = True
+    thread = threading.Thread(target=_load, daemon=True)
+    thread.start()
 
 
 def get_predictor():
@@ -49,9 +112,10 @@ def rate_limit_analyze(f):
     """Apply rate limiting to expensive analysis endpoints."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if hasattr(current_app, 'limiter'):
+        limiter = getattr(current_app, 'limiter', None)
+        if limiter is not None:
             limit = current_app.config.get('RATE_LIMIT_ANALYZE', '30 per minute')
-            return current_app.limiter.limit(limit)(f)(*args, **kwargs)
+            return limiter.limit(limit)(f)(*args, **kwargs)
         return f(*args, **kwargs)
     return decorated_function
 
@@ -77,15 +141,12 @@ def health_check():
     Returns:
         JSON with status and model info
     """
-    try:
-        predictor = get_predictor()
-        model_loaded = True
-    except Exception:
-        model_loaded = False
+    model_loaded = _predictor is not None
     
     return jsonify({
         'status': 'healthy',
         'model_loaded': model_loaded,
+        'model_loading': _predictor_loading,
         'timestamp': time.time()
     })
 
@@ -142,6 +203,8 @@ def analyze_text():
     if url and not text:
         text = extract_article_from_url(url)
         if not text:
+            text = get_fallback_text_from_feed(url)
+        if not text:
             return jsonify({
                 'success': False,
                 'error': 'Failed to extract article from URL'
@@ -166,9 +229,11 @@ def analyze_text():
     text = sanitize_text(text)
     
     try:
-        # Get predictor and run inference
-        predictor = get_predictor()
-        result = predictor.predict(text)
+        # Use the trained model when it is ready; otherwise fall back to a fast heuristic.
+        if _predictor is None:
+            result = _fallback_predict(text)
+        else:
+            result = _predictor.predict(text)
         
         # Run fact-check in parallel (non-blocking for bias detection)
         fact_check_result = check_facts(text)
@@ -497,6 +562,66 @@ def extract_article_from_url(url: str) -> Optional[str]:
     
     current_app.logger.error(f"All extraction methods failed for URL: {url}")
     return None
+
+
+def _normalize_article_url(url: str) -> str:
+    """Normalize article URLs for stable matching across sources."""
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower().replace('www.', '')
+        path = parsed.path.rstrip('/')
+
+        ignored_query_keys = {
+            'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+            'gclid', 'fbclid', 'igshid', 'mc_cid', 'mc_eid', 'publisher'
+        }
+        filtered_query = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+            if key.lower() not in ignored_query_keys
+        ]
+        filtered_query.sort(key=lambda pair: pair[0])
+        clean_query = urlencode(filtered_query, doseq=True)
+
+        return urlunparse((scheme, netloc, path, '', clean_query, ''))
+    except Exception:
+        return url.strip()
+
+
+def get_fallback_text_from_feed(url: str) -> Optional[str]:
+    """Build fallback text from feed title/description when URL fetch is blocked."""
+    try:
+        from backend.app.news_feed import get_news_feed_service
+
+        target_url = _normalize_article_url(url)
+        service = get_news_feed_service()
+        feed_data = service.get_feed(limit=100)
+        articles = feed_data.get('articles', [])
+
+        for article in articles:
+            article_url = article.get('url')
+            if not article_url:
+                continue
+
+            if _normalize_article_url(article_url) != target_url:
+                continue
+
+            title = (article.get('title') or '').strip()
+            description = (article.get('description') or '').strip()
+            source = (article.get('source') or '').strip()
+
+            fallback_parts = [part for part in [title, description, f"Source: {source}" if source else ''] if part]
+            fallback_text = '. '.join(fallback_parts)
+
+            if len(fallback_text.split()) >= 10:
+                current_app.logger.info(f"Using news feed fallback text for URL: {url}")
+                return fallback_text
+
+        return None
+    except Exception as e:
+        current_app.logger.debug(f"news feed fallback failed for URL {url}: {e}")
+        return None
 
 
 # =====================

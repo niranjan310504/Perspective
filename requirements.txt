@@ -24,6 +24,7 @@ cloudscraper==1.2.71
 # For better article extraction (optional but recommended):
 newspaper3k==0.2.8
 lxml==4.9.3
+lxml_html_clean==0.4.3
 
 # Security
 defusedxml==0.7.1

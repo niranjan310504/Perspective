@@ -73,7 +73,7 @@ def create_app(config_name: Optional[str] = None) -> Flask:
                 default_limits=[app.config.get('RATE_LIMIT_DEFAULT', '100 per minute')],
                 storage_uri="memory://",
             )
-            app.limiter = limiter
+            setattr(app, 'limiter', limiter)
             logger.info("Rate limiting enabled")
             
             # Custom rate limit exceeded handler
@@ -125,8 +125,11 @@ def create_app(config_name: Optional[str] = None) -> Flask:
         return response
     
     # Register blueprints
-    from backend.app.routes import api_bp
+    from backend.app.routes import api_bp, warm_predictor_async
     app.register_blueprint(api_bp, url_prefix='/api')
+
+    # Warm the trained model in the background so the first analysis request can fall back cleanly.
+    warm_predictor_async(app)
     
     # Global error handlers
     @app.errorhandler(400)

@@ -6,13 +6,14 @@ import axios from 'axios';
 export const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // ms
+const REQUEST_TIMEOUT = 120000;
 
 /**
  * Axios instance with default config
  */
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: REQUEST_TIMEOUT,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -63,6 +64,13 @@ export const analyzeText = async (payload) => {
     const response = await withRetry(() => api.post('/analyze', payload));
     return response.data;
   } catch (error) {
+    if (error.code === 'ECONNABORTED' || error.message?.toLowerCase().includes('timeout')) {
+      return {
+        success: false,
+        error: 'Analysis is taking longer than expected. The backend may still be loading the model. Please try again in a moment.'
+      };
+    }
+
     if (error.response) {
       // Server responded with error
       const status = error.response.status;
