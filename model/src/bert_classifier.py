@@ -69,6 +69,7 @@ class BertForMultiLabelBiasClassification(BertPreTrainedModel):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         return_dict: bool = True
     ) -> dict:
@@ -90,6 +91,7 @@ class BertForMultiLabelBiasClassification(BertPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
             return_dict=True
         )
         

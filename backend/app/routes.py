@@ -14,7 +14,7 @@ import time
 import threading
 from functools import wraps
 from flask import Blueprint, request, jsonify, current_app, g
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 from backend.app.fact_check import check_facts
@@ -59,6 +59,8 @@ def _fallback_predict(text: str):
         if result['detected_biases']
         else 'Heuristic fallback did not detect strong bias patterns.'
     )
+    result['analysis_mode'] = 'heuristic_fallback'
+    result['explanations'] = _build_heuristic_explanations(text, result['detected_biases'])
     return result
 
 
@@ -129,6 +131,71 @@ def sanitize_text(text: str) -> str:
     return text
 
 
+def _api_error(message: str, status_code: int = 400, *, error_code: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
+    """Build a consistent API error response."""
+    payload: Dict[str, Any] = {
+        'success': False,
+        'error': message,
+    }
+    if error_code:
+        payload['error_code'] = error_code
+    if details is not None:
+        payload['details'] = details
+    return jsonify(payload), status_code
+
+
+def _api_success(data: Dict[str, Any], *, processing_time_ms: Optional[float] = None, extra: Optional[Dict[str, Any]] = None):
+    """Build a consistent API success response."""
+    payload: Dict[str, Any] = {
+        'success': True,
+        'data': data,
+    }
+    if processing_time_ms is not None:
+        payload['processing_time_ms'] = round(processing_time_ms, 2)
+    if extra:
+        payload.update(extra)
+    return jsonify(payload)
+
+
+def _build_heuristic_explanations(text: str, detected_biases: list[str]) -> Dict[str, Any]:
+    """Create lightweight keyword-based explanations when gradient attribution is unavailable."""
+    keyword_map = {
+        'political': ['government', 'opposition', 'party', 'prime minister', 'chief minister', 'election', 'bjp', 'congress'],
+        'gender': ['woman', 'women', 'man', 'men', 'lady', 'female', 'male', 'gender'],
+        'entity': ['company', 'corporation', 'organization', 'minister', 'leader', 'officials', 'business'],
+        'racial': ['race', 'ethnic', 'caste', 'community', 'minority', 'majority'],
+        'religious': ['religion', 'religious', 'muslim', 'hindu', 'christian', 'sikh', 'temple', 'mosque', 'church'],
+        'regional': ['state', 'region', 'north', 'south', 'east', 'west', 'tamil nadu', 'kerala', 'up', 'bihar', 'maharashtra'],
+        'sensationalism': ['shocking', 'breaking', 'horrific', 'explosive', 'massive', 'disaster', 'carnage', 'outrage']
+    }
+
+    lowered = text.lower()
+    explanations: Dict[str, Any] = {
+        'method': 'heuristic_keywords',
+        'labels': {},
+    }
+
+    for label in detected_biases:
+        matches = [keyword for keyword in keyword_map.get(label, []) if keyword in lowered]
+        if not matches:
+            continue
+
+        explanations['labels'][label] = {
+            'method': 'heuristic_keywords',
+            'summary': f"Keyword cues matched for {label.replace('_', ' ')}.",
+            'highlights': [
+                {
+                    'text': keyword,
+                    'score': 0.72,
+                    'reason': 'keyword match',
+                }
+                for keyword in matches[:5]
+            ],
+        }
+
+    return explanations
+
+
 # Create blueprint
 api_bp = Blueprint('api', __name__)
 
@@ -181,49 +248,56 @@ def analyze_text():
     start_time = time.time()
     
     # Parse request
-    data = request.get_json()
+    data = request.get_json(silent=True)
     
     if not data:
-        return jsonify({
-            'success': False,
-            'error': 'Request body must be JSON'
-        }), 400
+        return _api_error('Request body must be JSON', 400, error_code='invalid_json')
     
     # Get text from request
     text = data.get('text')
     url = data.get('url')
     
     if not text and not url:
-        return jsonify({
-            'success': False,
-            'error': 'Either "text" or "url" must be provided'
-        }), 400
+        return _api_error('Either "text" or "url" must be provided', 400, error_code='missing_input')
     
     # If URL provided, extract article text
     if url and not text:
-        text = extract_article_from_url(url)
+        text, extraction_error = extract_article_from_url(url)
         if not text:
-            text = get_fallback_text_from_feed(url)
-        if not text:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to extract article from URL'
-            }), 400
+            if extraction_error and extraction_error.get('retryable') is False:
+                return _api_error(
+                    extraction_error['message'],
+                    400,
+                    error_code=extraction_error.get('code', 'url_extraction_failed'),
+                    details={'url': url, 'extraction': extraction_error}
+                )
+
+            text, fallback_error = get_fallback_text_from_feed(url)
+            if not text:
+                return _api_error(
+                    'Failed to extract article from URL',
+                    400,
+                    error_code='url_extraction_failed',
+                    details={
+                        'url': url,
+                        'extraction': extraction_error,
+                        'fallback': fallback_error,
+                    }
+                )
     
     # Validate text length
     max_length = current_app.config.get('MAX_TEXT_LENGTH', 50000)
     if len(text) > max_length:
-        return jsonify({
-            'success': False,
-            'error': f'Text exceeds maximum length of {max_length} characters'
-        }), 400
+        return _api_error(
+            f'Text exceeds maximum length of {max_length} characters',
+            400,
+            error_code='text_too_long',
+            details={'max_length': max_length}
+        )
     
     # Minimum text length
     if len(text.split()) < 10:
-        return jsonify({
-            'success': False,
-            'error': 'Text must contain at least 10 words'
-        }), 400
+        return _api_error('Text must contain at least 10 words', 400, error_code='text_too_short')
     
     # Sanitize text - remove control characters
     text = sanitize_text(text)
@@ -233,7 +307,7 @@ def analyze_text():
         if _predictor is None:
             result = _fallback_predict(text)
         else:
-            result = _predictor.predict(text)
+            result = _predictor.predict(text, include_explanations=True)
         
         # Run fact-check in parallel (non-blocking for bias detection)
         fact_check_result = check_facts(text)
@@ -241,24 +315,23 @@ def analyze_text():
         # Calculate processing time
         processing_time = (time.time() - start_time) * 1000
         
-        return jsonify({
-            'success': True,
-            'data': {
-                'text_preview': text[:200] + '...' if len(text) > 200 else text,
-                'biases': result['biases'],
-                'detected_biases': result['detected_biases'],
-                'summary': result['summary'],
-                'fact_check': fact_check_result
-            },
-            'processing_time_ms': round(processing_time, 2)
-        })
+        response_data: Dict[str, Any] = {
+            'text_preview': text[:200] + '...' if len(text) > 200 else text,
+            'biases': result['biases'],
+            'detected_biases': result['detected_biases'],
+            'summary': result['summary'],
+            'fact_check': fact_check_result,
+            'analysis_mode': result.get('analysis_mode', 'trained_model' if _predictor is not None else 'heuristic_fallback'),
+        }
+
+        if result.get('explanations') is not None:
+            response_data['explanations'] = result['explanations']
+
+        return _api_success(response_data, processing_time_ms=processing_time)
         
     except Exception as e:
         current_app.logger.error(f"Analysis error: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Internal error during analysis'
-        }), 500
+        return _api_error('Internal error during analysis', 500, error_code='analysis_failed')
 
 
 @api_bp.route('/analyze/batch', methods=['POST'])
@@ -283,33 +356,32 @@ def analyze_batch():
     """
     start_time = time.time()
     
-    data = request.get_json()
+    data = request.get_json(silent=True)
     
     if not data or 'texts' not in data:
-        return jsonify({
-            'success': False,
-            'error': 'Request must include "texts" array'
-        }), 400
+        return _api_error('Request must include "texts" array', 400, error_code='missing_texts')
     
     texts = data['texts']
     
     if not isinstance(texts, list):
-        return jsonify({
-            'success': False,
-            'error': '"texts" must be an array'
-        }), 400
+        return _api_error('"texts" must be an array', 400, error_code='invalid_texts')
     
     # Limit batch size
     max_batch_size = 20
     if len(texts) > max_batch_size:
-        return jsonify({
-            'success': False,
-            'error': f'Batch size exceeds maximum of {max_batch_size}'
-        }), 400
+        return _api_error(
+            f'Batch size exceeds maximum of {max_batch_size}',
+            400,
+            error_code='batch_too_large',
+            details={'max_batch_size': max_batch_size}
+        )
     
     try:
-        predictor = get_predictor()
-        results = predictor.predict_batch(texts)
+        if _predictor is None:
+            results = [_fallback_predict(sanitize_text(text)) for text in texts]
+        else:
+            predictor = get_predictor()
+            results = predictor.predict_batch(texts)
         
         processing_time = (time.time() - start_time) * 1000
         
@@ -322,10 +394,7 @@ def analyze_batch():
         
     except Exception as e:
         current_app.logger.error(f"Batch analysis error: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Internal error during batch analysis'
-        }), 500
+        return _api_error('Internal error during batch analysis', 500, error_code='batch_analysis_failed')
 
 
 @api_bp.route('/bias-types', methods=['GET'])
@@ -446,7 +515,7 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-def extract_article_from_url(url: str) -> Optional[str]:
+def extract_article_from_url(url: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """
     Extract article text from a URL with multiple fallback methods.
     Uses cloudscraper to bypass anti-bot protection (Cloudflare, etc.)
@@ -462,7 +531,11 @@ def extract_article_from_url(url: str) -> Optional[str]:
     # SSRF Protection: Validate URL is safe
     if not is_safe_url(url):
         current_app.logger.warning(f"Blocked unsafe URL: {url}")
-        return None
+        return None, {
+            'code': 'unsafe_url',
+            'message': 'URL failed safety validation',
+            'retryable': False,
+        }
     
     # Validate URL format
     url_pattern = re.compile(
@@ -475,7 +548,11 @@ def extract_article_from_url(url: str) -> Optional[str]:
     )
     
     if not url_pattern.match(url):
-        return None
+        return None, {
+            'code': 'invalid_url',
+            'message': 'URL format is invalid',
+            'retryable': False,
+        }
     
     # Method 1: Use cloudscraper (bypasses Cloudflare and anti-bot protection)
     try:
@@ -533,7 +610,7 @@ def extract_article_from_url(url: str) -> Optional[str]:
         if body:
             text = ' '.join(body.stripped_strings)
             if len(text) > 200:
-                return text[:10000]  # Limit length
+                return text[:10000], None  # Limit length
                 
     except ImportError:
         current_app.logger.warning("cloudscraper not installed, falling back to requests")
@@ -555,13 +632,17 @@ def extract_article_from_url(url: str) -> Optional[str]:
         
         if article.text and len(article.text) > 100:
             current_app.logger.info(f"Extracted {len(article.text)} chars using newspaper3k from {url}")
-            return article.text
+            return article.text, None
             
     except Exception as e:
         current_app.logger.debug(f"newspaper3k extraction failed: {e}")
     
     current_app.logger.error(f"All extraction methods failed for URL: {url}")
-    return None
+    return None, {
+        'code': 'article_extraction_failed',
+        'message': 'All extraction methods failed for this URL',
+        'retryable': True,
+    }
 
 
 def _normalize_article_url(url: str) -> str:
@@ -589,7 +670,7 @@ def _normalize_article_url(url: str) -> str:
         return url.strip()
 
 
-def get_fallback_text_from_feed(url: str) -> Optional[str]:
+def get_fallback_text_from_feed(url: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Build fallback text from feed title/description when URL fetch is blocked."""
     try:
         from backend.app.news_feed import get_news_feed_service
@@ -616,12 +697,20 @@ def get_fallback_text_from_feed(url: str) -> Optional[str]:
 
             if len(fallback_text.split()) >= 10:
                 current_app.logger.info(f"Using news feed fallback text for URL: {url}")
-                return fallback_text
+                return fallback_text, None
 
-        return None
+        return None, {
+            'code': 'feed_fallback_not_found',
+            'message': 'No matching feed article was found for this URL',
+            'retryable': True,
+        }
     except Exception as e:
         current_app.logger.debug(f"news feed fallback failed for URL {url}: {e}")
-        return None
+        return None, {
+            'code': 'feed_fallback_failed',
+            'message': 'Fallback feed lookup failed',
+            'retryable': True,
+        }
 
 
 # =====================

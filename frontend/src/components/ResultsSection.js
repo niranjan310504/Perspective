@@ -123,7 +123,7 @@ function ResultsSection({ results, articleUrl }) {
   
   if (!results) return null;
 
-  const { biases, detected_biases } = results;
+  const { biases, detected_biases, explanations } = results;
 
   // Sort biases by score (highest first)
   const sortedBiases = Object.entries(biases)
@@ -257,6 +257,7 @@ function ResultsSection({ results, articleUrl }) {
               biasType={biasType}
               score={data.score}
               detected={data.detected}
+              explanation={explanations?.labels?.[biasType]}
               isExpanded={expandedBias === biasType}
               onToggle={() => setExpandedBias(expandedBias === biasType ? null : biasType)}
             />
@@ -293,7 +294,7 @@ function ResultsSection({ results, articleUrl }) {
 /**
  * Individual Bias Detail Row with expandable explanation
  */
-function BiasDetailRow({ biasType, score, detected, isExpanded, onToggle }) {
+function BiasDetailRow({ biasType, score, detected, explanation, isExpanded, onToggle }) {
   const config = BIAS_CONFIG[biasType];
   const severity = getSeverity(score);
   const percentage = Math.round(score * 100);
@@ -377,6 +378,36 @@ function BiasDetailRow({ biasType, score, detected, isExpanded, onToggle }) {
                 <p className="text-blue-700 text-sm">{config.recommendation}</p>
               </div>
             )}
+
+            {/* Explainability */}
+            {explanation && explanation.highlights && explanation.highlights.length > 0 && (
+              <div className="bg-purple-50 rounded-lg p-3 border border-purple-200">
+                <h5 className="font-semibold text-purple-800 flex items-center mb-2">
+                  <span className="mr-1">🧠</span>
+                  Why the model flagged this
+                </h5>
+                <p className="text-purple-700 text-sm mb-2">
+                  {explanation.summary || 'Top contributing phrases identified by the explanation engine.'}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {explanation.highlights.map((item, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white border border-purple-200 text-purple-800 text-xs"
+                      title={`Score: ${Math.round((item.score || 0) * 100)}%`}
+                    >
+                      <span className="font-semibold">{item.text}</span>
+                      {item.reason && <span className="text-purple-500">({item.reason})</span>}
+                    </span>
+                  ))}
+                </div>
+                {explanation.method && (
+                  <p className="mt-2 text-xs text-purple-600">
+                    Explanation method: {explanation.method.replace(/_/g, ' ')}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -393,6 +424,17 @@ BiasDetailRow.propTypes = {
   ]).isRequired,
   score: PropTypes.number.isRequired,
   detected: PropTypes.bool.isRequired,
+  explanation: PropTypes.shape({
+    method: PropTypes.string,
+    summary: PropTypes.string,
+    highlights: PropTypes.arrayOf(PropTypes.shape({
+      text: PropTypes.string.isRequired,
+      score: PropTypes.number,
+      reason: PropTypes.string,
+      start: PropTypes.number,
+      end: PropTypes.number
+    }))
+  }),
   isExpanded: PropTypes.bool.isRequired,
   onToggle: PropTypes.func.isRequired
 };
@@ -406,7 +448,23 @@ ResultsSection.propTypes = {
       })
     ).isRequired,
     detected_biases: PropTypes.arrayOf(PropTypes.string).isRequired,
-    summary: PropTypes.string.isRequired
+    summary: PropTypes.string.isRequired,
+    explanations: PropTypes.shape({
+      method: PropTypes.string,
+      labels: PropTypes.objectOf(
+        PropTypes.shape({
+          method: PropTypes.string,
+          summary: PropTypes.string,
+          highlights: PropTypes.arrayOf(PropTypes.shape({
+            text: PropTypes.string.isRequired,
+            score: PropTypes.number,
+            reason: PropTypes.string,
+            start: PropTypes.number,
+            end: PropTypes.number
+          }))
+        })
+      )
+    })
   }),
   articleUrl: PropTypes.string
 };

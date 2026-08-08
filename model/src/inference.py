@@ -11,7 +11,7 @@ This module provides classes for:
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 import torch
 from transformers import BertTokenizer, AutoTokenizer, AutoModelForSequenceClassification
 
@@ -23,6 +23,17 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from data.schema import BIAS_LABELS, BIAS_DESCRIPTIONS
+
+
+BIAS_KEYWORDS = {
+    'political': ['government', 'opposition', 'party', 'prime minister', 'chief minister', 'election', 'bjp', 'congress'],
+    'gender': ['woman', 'women', 'man', 'men', 'lady', 'female', 'male', 'gender'],
+    'entity': ['company', 'corporation', 'organization', 'minister', 'leader', 'officials', 'business'],
+    'racial': ['race', 'ethnic', 'caste', 'community', 'minority', 'majority'],
+    'religious': ['religion', 'religious', 'muslim', 'hindu', 'christian', 'sikh', 'temple', 'mosque', 'church'],
+    'regional': ['state', 'region', 'north', 'south', 'east', 'west', 'tamil nadu', 'kerala', 'up', 'bihar', 'maharashtra'],
+    'sensationalism': ['shocking', 'breaking', 'horrific', 'explosive', 'massive', 'disaster', 'carnage', 'outrage'],
+}
 
 
 class BiasPredictor:
@@ -131,11 +142,236 @@ class BiasPredictor:
             return model
         else:
             raise FileNotFoundError(f"No model found in {self.actual_model_dir}")
+
+    def _forward_logits(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run the underlying model and normalize the logits output."""
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+        )
+
+        if hasattr(outputs, 'logits'):
+            return outputs.logits
+        if isinstance(outputs, dict) and 'logits' in outputs:
+            return outputs['logits']
+        if isinstance(outputs, tuple):
+            return outputs[0]
+        return outputs
+
+    def _build_result(self, probabilities) -> Dict[str, Any]:
+        """Format probabilities into the project response schema."""
+        predictions = (probabilities >= self.threshold).astype(int)
+
+        result: Dict[str, Any] = {
+            'biases': {},
+            'detected_biases': [],
+            'summary': '',
+        }
+
+        for i, label_name in enumerate(BIAS_LABELS):
+            result['biases'][label_name] = {
+                'detected': bool(predictions[i]),
+                'score': float(probabilities[i])
+            }
+
+            if predictions[i]:
+                result['detected_biases'].append(label_name)
+
+        result['summary'] = self._generate_summary(result['detected_biases'])
+        return result
+
+    def _heuristic_explanations(self, text: str, detected_biases: List[str], reason: Optional[str] = None) -> Dict[str, Any]:
+        """Create deterministic keyword-based explanations as fallback."""
+        lowered = text.lower()
+        explanations: Dict[str, Any] = {
+            'method': 'heuristic_keywords',
+            'reason': reason,
+            'labels': {},
+        }
+
+        labels_to_check = detected_biases or list(BIAS_LABELS)
+
+        for label in labels_to_check:
+            matches = [keyword for keyword in BIAS_KEYWORDS.get(label, []) if keyword in lowered]
+            if not matches:
+                continue
+
+            explanations['labels'][label] = {
+                'method': 'heuristic_keywords',
+                'summary': f"Keyword cues matched for {label.replace('_', ' ')}.",
+                'highlights': [
+                    {
+                        'text': keyword,
+                        'score': 0.72,
+                        'reason': 'keyword match',
+                    }
+                    for keyword in matches[:5]
+                ],
+            }
+
+        return explanations
+
+    def _merge_spans(self, spans: List[Dict[str, Any]], max_gap: int = 2) -> List[Dict[str, Any]]:
+        """Merge nearby token spans into short phrase-level highlights."""
+        if not spans:
+            return []
+
+        ordered = sorted(spans, key=lambda item: (item['start'], item['end']))
+        merged: List[Dict[str, Any]] = [ordered[0].copy()]
+
+        for span in ordered[1:]:
+            current = merged[-1]
+            if span['start'] <= current['end'] + max_gap:
+                current['end'] = max(current['end'], span['end'])
+                current['score'] = max(current['score'], span['score'])
+            else:
+                merged.append(span.copy())
+
+        return merged
+
+    def _build_span_highlights(
+        self,
+        text: str,
+        input_ids: torch.Tensor,
+        token_scores: torch.Tensor,
+        offsets,
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """Convert token scores to readable text spans."""
+        special_token_ids = {
+            token_id for token_id in [self.tokenizer.cls_token_id, self.tokenizer.sep_token_id, self.tokenizer.pad_token_id]
+            if token_id is not None
+        }
+
+        candidates: List[Dict[str, Any]] = []
+        input_ids_list = input_ids[0].tolist()
+        token_scores_list = token_scores.tolist()
+
+        for index, token_id in enumerate(input_ids_list):
+            if token_id in special_token_ids:
+                continue
+
+            start, end = offsets[index]
+            if end <= start:
+                continue
+
+            phrase = text[start:end].strip()
+            if not phrase:
+                continue
+
+            candidates.append({
+                'text': phrase,
+                'start': int(start),
+                'end': int(end),
+                'score': float(token_scores_list[index]),
+            })
+
+        if not candidates:
+            return []
+
+        top_candidates = sorted(candidates, key=lambda item: item['score'], reverse=True)[:max(top_k * 2, top_k)]
+        merged = self._merge_spans(top_candidates)
+
+        for span in merged:
+            span['text'] = text[span['start']:span['end']].strip()
+
+        return merged[:top_k]
+
+    def _gradient_explanation(
+        self,
+        text: str,
+        label_index: int,
+        top_k: int = 5,
+    ) -> Dict[str, Any]:
+        """Compute gradient-based token attribution for a single label."""
+        encoding = self.tokenizer(
+            text,
+            add_special_tokens=True,
+            max_length=512,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt',
+            return_offsets_mapping=True,
+        )
+
+        offsets = encoding.pop('offset_mapping')[0].tolist()
+        input_ids = encoding['input_ids'].to(self.device)
+        attention_mask = encoding['attention_mask'].to(self.device)
+        token_type_ids = encoding.get('token_type_ids')
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids.to(self.device)
+
+        embedding_layer = self.model.get_input_embeddings()
+        inputs_embeds = embedding_layer(input_ids).detach().requires_grad_(True)
+
+        self.model.zero_grad(set_to_none=True)
+        logits = self._forward_logits(
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+        )
+
+        target_logit = logits[0, label_index]
+        target_logit.backward()
+
+        token_scores = (inputs_embeds.grad * inputs_embeds).abs().sum(dim=-1).squeeze(0).detach().cpu()
+        highlights = self._build_span_highlights(text, input_ids.detach().cpu(), token_scores, offsets, top_k)
+
+        return {
+            'method': 'gradient_attribution',
+            'label': BIAS_LABELS[label_index],
+            'summary': f"Top gradient-based spans supporting {BIAS_LABELS[label_index].replace('_', ' ')}.",
+            'highlights': highlights,
+        }
+
+    def explain(
+        self,
+        text: str,
+        detected_biases: Optional[List[str]] = None,
+        probabilities=None,
+        top_k: int = 5,
+    ) -> Dict[str, Any]:
+        """Generate bias explanations with gradient attribution and heuristic fallback."""
+        if not getattr(self.tokenizer, 'is_fast', False):
+            return self._heuristic_explanations(text, detected_biases or [], reason='Tokenizer does not support offset mappings')
+
+        labels_to_explain = detected_biases or []
+        if not labels_to_explain and probabilities is not None:
+            sorted_indices = torch.topk(torch.tensor(probabilities), k=min(3, len(probabilities))).indices.tolist()
+            labels_to_explain = [BIAS_LABELS[index] for index in sorted_indices]
+
+        explanations: Dict[str, Any] = {
+            'method': 'gradient_attribution',
+            'labels': {},
+        }
+
+        try:
+            if not labels_to_explain:
+                labels_to_explain = list(BIAS_LABELS[:3])
+
+            for label_name in labels_to_explain:
+                label_index = BIAS_LABELS.index(label_name)
+                explanations['labels'][label_name] = self._gradient_explanation(text, label_index, top_k=top_k)
+
+            return explanations
+        except Exception as exc:
+            logger.debug(f"Gradient explainability failed, using heuristic fallback: {exc}")
+            return self._heuristic_explanations(text, labels_to_explain, reason=str(exc))
     
     def predict(
         self,
         text: str,
-        return_probabilities: bool = True
+        return_probabilities: bool = True,
+        include_explanations: bool = False,
+        explanation_top_k: int = 5,
     ) -> Dict:
         """
         Predict bias labels for a single text.
@@ -159,47 +395,34 @@ class BiasPredictor:
         
         input_ids = encoding['input_ids'].to(self.device)
         attention_mask = encoding['attention_mask'].to(self.device)
+        token_type_ids = encoding.get('token_type_ids')
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids.to(self.device)
         
         # Inference
         with torch.no_grad():
-            outputs = self.model(
+            logits = self._forward_logits(
                 input_ids=input_ids,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
             )
         
-        # Handle both HuggingFace and custom model outputs
-        if hasattr(outputs, 'logits'):
-            # HuggingFace format
-            logits = outputs.logits
-            probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy()
-        elif isinstance(outputs, dict) and 'probabilities' in outputs:
-            # Custom model format
-            probabilities = outputs['probabilities'].squeeze(0).cpu().numpy()
-        else:
-            # Fallback
-            logits = outputs[0] if isinstance(outputs, tuple) else outputs
-            probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+        probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy()
         
-        predictions = (probabilities >= self.threshold).astype(int)
-        
-        # Format results
-        result = {
-            'biases': {},
-            'detected_biases': [],
-            'summary': ''
-        }
-        
-        for i, label_name in enumerate(BIAS_LABELS):
-            result['biases'][label_name] = {
-                'detected': bool(predictions[i]),
-                'score': float(probabilities[i])
-            }
-            
-            if predictions[i]:
-                result['detected_biases'].append(label_name)
-        
-        # Generate summary
-        result['summary'] = self._generate_summary(result['detected_biases'])
+        result = self._build_result(probabilities)
+        result['analysis_mode'] = 'trained_model'
+
+        if include_explanations:
+            try:
+                result['explanations'] = self.explain(
+                    text,
+                    detected_biases=result['detected_biases'],
+                    probabilities=probabilities,
+                    top_k=explanation_top_k,
+                )
+            except Exception as exc:
+                logger.debug(f"Explainability generation failed, using heuristic fallback: {exc}")
+                result['explanations'] = self._heuristic_explanations(text, result['detected_biases'], reason=str(exc))
         
         return result
     
@@ -235,44 +458,24 @@ class BiasPredictor:
             
             input_ids = encodings['input_ids'].to(self.device)
             attention_mask = encodings['attention_mask'].to(self.device)
+            token_type_ids = encodings.get('token_type_ids')
+            if token_type_ids is not None:
+                token_type_ids = token_type_ids.to(self.device)
             
             # Inference
             with torch.no_grad():
-                outputs = self.model(
+                logits = self._forward_logits(
                     input_ids=input_ids,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
                 )
-            
-            # Handle both HuggingFace and custom model outputs
-            if hasattr(outputs, 'logits'):
-                logits = outputs.logits
-                probabilities = torch.sigmoid(logits).cpu().numpy()
-            elif isinstance(outputs, dict) and 'probabilities' in outputs:
-                probabilities = outputs['probabilities'].cpu().numpy()
-            else:
-                logits = outputs[0] if isinstance(outputs, tuple) else outputs
-                probabilities = torch.sigmoid(logits).cpu().numpy()
+
+            probabilities = torch.sigmoid(logits).cpu().numpy()
             
             # Process each result
             for j, probs in enumerate(probabilities):
-                predictions = (probs >= self.threshold).astype(int)
-                
-                result = {
-                    'biases': {},
-                    'detected_biases': [],
-                    'summary': ''
-                }
-                
-                for k, label_name in enumerate(BIAS_LABELS):
-                    result['biases'][label_name] = {
-                        'detected': bool(predictions[k]),
-                        'score': float(probs[k])
-                    }
-                    
-                    if predictions[k]:
-                        result['detected_biases'].append(label_name)
-                
-                result['summary'] = self._generate_summary(result['detected_biases'])
+                result = self._build_result(probs)
+                result['analysis_mode'] = 'trained_model'
                 results.append(result)
         
         return results

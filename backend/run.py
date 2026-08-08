@@ -25,6 +25,7 @@ def main():
     config_name = os.getenv('FLASK_ENV', 'development')
     port = int(os.getenv('PORT', 5000))
     host = os.getenv('HOST', '0.0.0.0')
+    use_reloader = os.getenv('FLASK_USE_RELOADER', 'false').lower() == 'true'
     
     # Create application
     app = create_app(config_name)
@@ -43,7 +44,8 @@ def main():
     app.run(
         host=host,
         port=port,
-        debug=app.debug
+        debug=app.debug,
+        use_reloader=use_reloader
     )
 
 

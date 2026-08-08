@@ -85,19 +85,22 @@ export const analyzeText = async (payload) => {
       
       return {
         success: false,
-        error: data.error || `Server error (${status})`
+        error: data.error || `Server error (${status})`,
+        details: data.details || null
       };
     } else if (error.request) {
       // No response received
       return {
         success: false,
-        error: 'Unable to connect to the server. Please ensure the backend is running.'
+        error: 'Unable to connect to the server. Please ensure the backend is running.',
+        details: null
       };
     } else {
       // Request setup error
       return {
         success: false,
-        error: error.message
+        error: error.message,
+        details: null
       };
     }
   }
